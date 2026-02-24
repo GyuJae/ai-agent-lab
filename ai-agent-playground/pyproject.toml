@@ -1,0 +1,12 @@
+[project]
+name = "ai-agent-playground"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "ipykernel>=7.1.0",
+    "openai>=2.16.0",
+    "python-dotenv>=1.2.1",
+    "requests>=2.32.5",
+]
