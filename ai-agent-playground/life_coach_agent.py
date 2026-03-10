@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import os
 from datetime import datetime
@@ -6,7 +7,8 @@ from datetime import datetime
 import streamlit as st
 from dotenv import load_dotenv
 from openai import OpenAI
-from agents import Agent, Runner, WebSearchTool, FileSearchTool
+from agents import Agent, Runner, WebSearchTool, FileSearchTool, ImageGenerationTool
+from agents.items import ImageGenerationCall
 
 load_dotenv()
 
@@ -109,12 +111,24 @@ agent = Agent(
 - 사용자의 목표 달성, 습관 형성, 동기부여를 돕습니다
 - 파일 검색(file_search)을 통해 사용자가 업로드한 개인 목표와 일기를 참조합니다
 - 웹 검색(web_search)을 활용하여 과학적 근거가 있는 조언을 제공합니다
+- 이미지 생성(image_generation)을 통해 비전 보드, 동기부여 포스터, 축하 이미지를 만듭니다
 
 작업 방식:
 1. 사용자가 목표나 진행 상황에 대해 물으면, 먼저 file_search로 관련 목표와 기록을 찾습니다
 2. 찾은 목표/기록을 바탕으로 개인화된 피드백을 제공합니다
 3. 필요시 web_search로 최신 연구나 팁을 찾아 추천합니다
 4. 시간에 따른 진행 상황을 추적하고 격려합니다
+5. 다음과 같은 상황에서 이미지를 생성합니다:
+   - 사용자가 목표를 달성했을 때 → 축하 이미지 생성
+   - 비전 보드를 요청했을 때 → file_search로 목표를 먼저 확인한 후, 목표 테마를 담은 비전 보드 이미지 생성
+   - 동기부여 포스터를 요청했을 때 → 맞춤 메시지가 담긴 동기부여 포스터 생성
+   - 진행 상황을 시각적으로 보여달라고 할 때 → 진행 상황을 시각화한 이미지 생성
+
+이미지 생성 가이드:
+- 이미지 프롬프트는 영어로 작성하되, 이미지 안에 들어가는 텍스트는 한국어로 포함합니다
+- 비전 보드: 사용자의 구체적 목표들을 시각적 요소로 표현하는 콜라주 스타일
+- 동기부여 포스터: 영감을 주는 배경에 동기부여 메시지를 담은 포스터 스타일
+- 축하 이미지: 밝고 축제 분위기의 축하 이미지
 
 규칙:
 - 항상 한국어로 응답합니다
@@ -122,7 +136,8 @@ agent = Agent(
 - 사용자를 격려하고 긍정적인 톤을 유지합니다
 - 목표 문서에서 찾은 정보를 명시적으로 인용하며 언급합니다
 - 웹 검색 결과와 개인 목표를 결합하여 맞춤형 조언을 제공합니다
-- 일기 기록이 있다면 과거 기록을 참조하여 진행 상황을 추적합니다""",
+- 일기 기록이 있다면 과거 기록을 참조하여 진행 상황을 추적합니다
+- 이미지를 생성할 때는 사용자에게 이미지를 만들고 있다고 안내합니다""",
     model="gpt-4o-mini",
     tools=[
         WebSearchTool(),
@@ -131,13 +146,14 @@ agent = Agent(
             max_num_results=5,
             include_search_results=True,
         ),
+        ImageGenerationTool(tool_config={"type": "image_generation"}),
     ],
 )
 
 # ── Streamlit UI ──
 st.set_page_config(page_title="Life Coach Agent", page_icon="🌱", layout="wide")
 st.title("🌱 Life Coach Agent")
-st.caption("개인 목표 관리 · 일기 기록 · 진행 상황 추적 · 맞춤형 코칭")
+st.caption("개인 목표 관리 · 일기 기록 · 진행 상황 추적 · 맞춤형 코칭 · 이미지 생성")
 
 # ── 사이드바: 문서 관리 ──
 with st.sidebar:
@@ -192,6 +208,8 @@ if "agent_history" not in st.session_state:
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
+        for img in msg.get("images", []):
+            st.image(base64.b64decode(img), use_container_width=True)
 
 if prompt := st.chat_input("무엇이든 물어보세요! (예: 내 운동 목표 달성은 잘 되어가고 있어?)"):
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -209,5 +227,14 @@ if prompt := st.chat_input("무엇이든 물어보세요! (예: 내 운동 목�
 
         st.markdown(response)
 
+        # 생성된 이미지 추출 및 표시
+        images = []
+        for item in result.new_items:
+            if isinstance(item.raw_item, ImageGenerationCall) and item.raw_item.result:
+                images.append(item.raw_item.result)
+                st.image(base64.b64decode(item.raw_item.result), use_container_width=True)
+
     st.session_state.agent_history = result.to_input_list()
-    st.session_state.messages.append({"role": "assistant", "content": response})
+    st.session_state.messages.append(
+        {"role": "assistant", "content": response, "images": images}
+    )
