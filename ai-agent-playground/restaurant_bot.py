@@ -1,4 +1,5 @@
 import asyncio
+import os
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -19,6 +20,10 @@ from agents import (
 from agents.extensions.handoff_prompt import prompt_with_handoff_instructions
 
 load_dotenv()
+
+# Streamlit Cloud: st.secrets에서 API 키 로드
+if "OPENAI_API_KEY" in st.secrets:
+    os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
 
 # ── 메뉴 데이터 ──
 MENU = {
