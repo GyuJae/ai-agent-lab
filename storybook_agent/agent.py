@@ -1,9 +1,52 @@
 import json
 
-from google.adk.agents import Agent, SequentialAgent
+from google.adk.agents import Agent, SequentialAgent, ParallelAgent
 from google.adk.tools import ToolContext
 from google import genai
 from google.genai import types
+
+
+# ---------------------------------------------------------------------------
+# Callbacks: 진행 상황 표시
+# ---------------------------------------------------------------------------
+def before_story_writer(callback_context):
+    """스토리 작성 시작 전 진행 상황을 표시합니다."""
+    print("\n📖 [진행 상황] 스토리 작성 중...")
+    callback_context.state["progress"] = "스토리 작성 중..."
+    return None
+
+
+def after_story_writer(callback_context):
+    """스토리 작성 완료 후 진행 상황을 표시합니다."""
+    pages = callback_context.state.get("story_pages", [])
+    print(f"✅ [진행 상황] 스토리 작성 완료! ({len(pages)}페이지)")
+    callback_context.state["progress"] = f"스토리 작성 완료 ({len(pages)}페이지)"
+    return None
+
+
+def _make_before_illustrator_callback(page_num: int):
+    """각 페이지별 삽화 생성 시작 콜백을 생성합니다."""
+    def before_illustrator(callback_context):
+        print(f"🎨 [진행 상황] 이미지 {page_num}/5 생성 중...")
+        callback_context.state["progress"] = f"이미지 {page_num}/5 생성 중..."
+        return None
+    return before_illustrator
+
+
+def _make_after_illustrator_callback(page_num: int):
+    """각 페이지별 삽화 생성 완료 콜백을 생성합니다."""
+    def after_illustrator(callback_context):
+        print(f"✅ [진행 상황] 이미지 {page_num}/5 생성 완료!")
+        callback_context.state["progress"] = f"이미지 {page_num}/5 생성 완료"
+        return None
+    return after_illustrator
+
+
+def after_pipeline(callback_context):
+    """전체 파이프라인 완료 후 콜백."""
+    print("\n🎉 [진행 상황] 동화책 생성 완료!")
+    callback_context.state["progress"] = "동화책 생성 완료!"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -39,32 +82,35 @@ async def save_story_to_state(
 
 
 # ---------------------------------------------------------------------------
-# Tool: State에서 스토리를 읽어 각 페이지의 이미지를 생성
+# Tool: 특정 페이지의 이미지를 생성 (ParallelAgent용 개별 페이지 생성)
 # ---------------------------------------------------------------------------
-async def generate_page_images(tool_context: ToolContext) -> dict:
-    """Read story pages from state and generate an illustration for each page.
+def _make_generate_single_page_image(page_num: int):
+    """특정 페이지 번호의 이미지를 생성하는 도구 함수를 만듭니다."""
 
-    Reads the 'story_pages' key from session state, generates an image for
-    each page's visual description using Imagen, and saves each image as
-    an artifact.
+    async def generate_single_page_image(tool_context: ToolContext) -> dict:
+        """Read a specific page from state and generate its illustration.
 
-    Returns:
-        A summary of generated images per page.
-    """
-    pages = tool_context.state.get("story_pages")
-    if not pages:
-        return {"status": "error", "message": "State에 스토리 데이터가 없습니다."}
+        Reads the story page from session state and generates an image
+        using Imagen 3.0, then saves it as an artifact.
 
-    client = genai.Client()
-    results = []
+        Returns:
+            A summary of the generated image for this page.
+        """
+        pages = tool_context.state.get("story_pages")
+        if not pages:
+            return {"status": "error", "message": "State에 스토리 데이터가 없습니다."}
 
-    for page in pages:
-        page_num = page["page"]
+        if page_num > len(pages):
+            return {"status": "error", "message": f"페이지 {page_num}이 존재하지 않습니다."}
+
+        page = pages[page_num - 1]
         visual_desc = page["visual"]
         prompt = (
             f"Children's storybook illustration, cute and colorful style, "
             f"soft pastel colors, friendly characters: {visual_desc}"
         )
+
+        client = genai.Client()
 
         try:
             response = client.models.generate_images(
@@ -85,24 +131,29 @@ async def generate_page_images(tool_context: ToolContext) -> dict:
                 filename=filename, artifact=artifact
             )
 
-            results.append(
-                {
-                    "page": page_num,
-                    "filename": filename,
-                    "version": version,
-                    "status": "success",
-                }
-            )
+            return {
+                "page": page_num,
+                "filename": filename,
+                "version": version,
+                "status": "success",
+            }
         except Exception as e:
-            results.append(
-                {
-                    "page": page_num,
-                    "status": "error",
-                    "message": str(e),
-                }
-            )
+            return {
+                "page": page_num,
+                "status": "error",
+                "message": str(e),
+            }
 
-    return {"status": "success", "images": results}
+    # 함수 이름과 docstring을 페이지별로 고유하게 설정
+    generate_single_page_image.__name__ = f"generate_page_{page_num}_image"
+    generate_single_page_image.__doc__ = (
+        f"Generate an illustration for page {page_num} of the storybook. "
+        f"Reads page {page_num} data from state and creates an image using Imagen 3.0. "
+        f"You MUST call this tool to generate the image for page {page_num}. "
+        f"This tool takes no arguments."
+    )
+
+    return generate_single_page_image
 
 
 # ---------------------------------------------------------------------------
@@ -134,28 +185,41 @@ JSON 형식 예시:
 """,
     tools=[save_story_to_state],
     output_key="story_output",
+    before_agent_callback=before_story_writer,
+    after_agent_callback=after_story_writer,
 )
 
 
 # ---------------------------------------------------------------------------
-# Agent 2: Illustrator Agent
+# Agent 2: 5개의 Illustrator Agent (ParallelAgent로 동시 실행)
 # ---------------------------------------------------------------------------
-illustrator_agent = Agent(
-    name="illustrator",
-    model="gemini-2.5-flash",
-    description="동화의 각 페이지에 삽화를 생성하는 에이전트",
-    instruction="""당신은 어린이 동화의 삽화를 그리는 일러스트레이터입니다.
+page_illustrator_agents = []
+for i in range(1, 6):
+    page_agent = Agent(
+        name=f"illustrator_page_{i}",
+        model="gemini-2.5-flash",
+        description=f"동화 {i}페이지의 삽화를 생성하는 에이전트",
+        instruction=f"""당신은 어린이 동화의 삽화를 그리는 일러스트레이터입니다.
 
-이전 에이전트가 State에 저장한 스토리 데이터를 읽어 각 페이지의 이미지를 생성합니다.
+당신의 임무는 동화책의 {i}페이지 삽화를 생성하는 것입니다.
+반드시 generate_page_{i}_image 도구를 호출하여 이미지를 생성하세요.
 
-반드시 generate_page_images 도구를 호출하여 모든 페이지의 이미지를 생성하세요.
-
-이미지 생성이 완료되면 각 페이지의 결과를 다음 형식으로 보여주세요:
-- Page N: ✅ 이미지 생성 완료 (filename)
+이미지 생성이 완료되면 결과를 보고하세요:
+- Page {i}: ✅ 이미지 생성 완료 (filename)
 또는
-- Page N: ❌ 이미지 생성 실패 (에러 메시지)
+- Page {i}: ❌ 이미지 생성 실패 (에러 메시지)
 """,
-    tools=[generate_page_images],
+        tools=[_make_generate_single_page_image(i)],
+        before_agent_callback=_make_before_illustrator_callback(i),
+        after_agent_callback=_make_after_illustrator_callback(i),
+    )
+    page_illustrator_agents.append(page_agent)
+
+# ParallelAgent: 5개의 이미지를 동시에 생성
+parallel_illustrator = ParallelAgent(
+    name="parallel_illustrator",
+    description="5개의 삽화를 동시에 생성하는 병렬 에이전트",
+    sub_agents=page_illustrator_agents,
 )
 
 
@@ -164,6 +228,7 @@ illustrator_agent = Agent(
 # ---------------------------------------------------------------------------
 root_agent = SequentialAgent(
     name="storybook_creator",
-    description="어린이 동화책을 만드는 파이프라인: 스토리 작성 → 삽화 생성",
-    sub_agents=[story_writer_agent, illustrator_agent],
+    description="어린이 동화책을 만드는 파이프라인: 스토리 작성 → 삽화 병렬 생성",
+    sub_agents=[story_writer_agent, parallel_illustrator],
+    after_agent_callback=after_pipeline,
 )
